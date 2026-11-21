@@ -250,7 +250,81 @@ curl https://xxxx.trycloudflare.com/v1/chat/completions \
 
 ---
 
-## 性能
+## 长上下文（262k 原生 → 512k → 1M）
+
+Qwen3.6-35B-A3B 的 `max_position_embeddings = 262144`。**再往上必须开 YaRN 位置插值**，
+否则只是把 `--ctx-size` 调大，attention 在训练范围外的位置上是纯外推，长文尾部会开始胡言。
+
+好消息是这模型**装得下**，因为它是混合注意力：40 层里只有 **10 层是全注意力**
+（`full_attention_interval = 4`），另外 30 层是线性注意力，KV 不随上下文增长。
+KV 只算 10 层 × 2 KV head × 256 head_dim：
+
+| 上下文 | KV f16 | KV q8_0 | KV q4_0 | 合计(q4_0，含 19.78G 权重) | 30G 卡 |
+|---|---|---|---|---|---|
+| 32k | 0.62 GB | 0.33 GB | 0.18 GB | 22.8 GB | ✅ |
+| 64k | 1.25 GB | 0.66 GB | 0.35 GB | 23.0 GB | ✅ |
+| 128k | 2.50 GB | 1.33 GB | 0.70 GB | 23.3 GB | ✅ |
+| 256k（原生上限） | 5.00 GB | 2.66 GB | 1.41 GB | 24.0 GB | ✅ |
+| **512k** | 10.00 GB | 5.31 GB | **2.81 GB** | **25.4 GB** | ✅ 紧但可行 |
+| 1M | 20.00 GB | 10.62 GB | 5.62 GB | 28.3 GB | ⚠️ 极限 |
+
+### 三档预设（Cell 1 只改这 4 个数）
+
+```python
+# ① 262144 — 原生上限，质量最好，不用改 rope
+CTX_SIZE = 262144
+ROPE_SCALING = ""; ROPE_SCALE = 0.0; YARN_ORIG_CTX = 0
+KV_CACHE_TYPE = "q8_0"
+
+# ② 524288（512k）— YaRN ×2，2×T4 的实用极限
+CTX_SIZE = 524288
+ROPE_SCALING = "yarn"; ROPE_SCALE = 2.0; YARN_ORIG_CTX = 262144
+KV_CACHE_TYPE = "q4_0"
+N_CPU_MOE = 4          # 留点余量，防长对话中途 OOM
+
+# ③ 1048576（1M）— 能配出来，实际很难用（见下）
+CTX_SIZE = 1048576
+ROPE_SCALING = "yarn"; ROPE_SCALE = 4.0; YARN_ORIG_CTX = 262144
+KV_CACHE_TYPE = "q4_0"
+N_CPU_MOE = 12
+```
+
+Cell 5 会自动把这三个开关翻成 llama-server 参数：
+
+```
+--rope-scaling yarn --rope-scale 2.0 --yarn-orig-ctx 262144
+```
+
+> `KV_CACHE_TYPE` 用 `q4_0` 的前提是 `1b_setup_llama.ipynb` 编译时带了
+> `-DGGML_CUDA_FA_ALL_QUANTS=ON`（本仓库默认带），否则量化 KV + FlashAttention 会报错或出乱码。
+
+### 现实成本（2×T4）
+
+- **首次 prefill 很贵**：512k token 全量过一遍，按实测 150–400 tok/s 大约 **20–60 分钟**；
+  256k 约 10–25 分钟。之后同一条对话继续问，命中 KV 缓存就很快。
+- **每轮都变长**：`--cache-reuse` 能复用前缀，但改了历史就得重算。
+- **Kaggle 12 小时会话**跑不了几次 512k 的 prefill。
+- 结论：**256k 是“好用”，512k 是“能跑”，1M 是“能配出来但别指望”。**
+
+### 怎么验收 512k 真的没崩
+
+开 yarn 之后必须实测位置外推质量，别信「跑起来了 = 好了」：
+
+1. 启动后确认实际生效：
+
+```python
+import requests
+p = requests.get(f"http://localhost:{8080}/props", timeout=30).json()
+print("n_ctx =", p["default_generation_settings"]["n_ctx"])
+```
+
+2. 在 notebook 里造一个 **needle test**（把一句特征串塞进 40 万 token 的噪声里，再问它在哪）。
+   能准确捞回来 = 位置编码没崩；答非所问 = yarn 没生效或被忽略，退回 262144。
+
+3. 如果 yarn 参数被忽略（llama.cpp 对 mrope 模型偶有这种情况），日志里不会报错，
+   只有 needle test 能暴露 —— 这就是为什么要测。
+
+
 
 | Kaggle GPU | 显存 | 速度 |
 |---|---|---|
