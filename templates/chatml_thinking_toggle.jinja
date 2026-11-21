@@ -1,0 +1,66 @@
+{# ─────────────────────────────────────────────────────────────────────────────
+   chatml_thinking_toggle.jinja — minimal Qwen-style ChatML template.
+
+   WHY THIS FILE EXISTS
+     The stock Qwen3.6 template embeds a fixed system preamble and a
+     thinking-mode branch. Some community GGUFs ship a template that still
+     carries that boilerplate. If the self-test cell in 2_run_server.ipynb
+     reports suspicious keywords inside the server's chat_template, you can
+     override the template with this file:
+
+        USE_CUSTOM_TEMPLATE = True
+        CUSTOM_TEMPLATE     = "templates/chatml_thinking_toggle.jinja"
+        ... llama-server ... --jinja --chat-template-file templates/chatml_thinking_toggle.jinja
+
+   WHAT IT DOES
+     - emits <|im_start|>role\n ... <|im_end|>\n exactly like stock ChatML
+     - honour enable_thinking (false ⇒ the model is told to skip the trace by
+       being pushed past the think block; if it still thinks, run the server
+       with --reasoning-format deepseek so tags are stripped from content)
+     - keeps a trailing assistant message as a PREFILL instead of closing it,
+       which is what makes the refusal-guard retry in chat.py work
+     - supports multimodal content lists (text parts only; llama-server injects
+       the image tokens itself from image_url parts)
+
+   RISK
+     A wrong template degrades output quality. Keep USE_CUSTOM_TEMPLATE = False
+     unless the audit cell proves the stock template is contaminated, and
+     re-run the self-test cell after switching.
+   ──────────────────────────────────────────────────────────────────────────── #}
+{%- set ns = namespace(system='') -%}
+{%- if messages and messages[0].role == 'system' -%}
+  {%- set ns.system = messages[0].content if messages[0].content is string else '' -%}
+  {%- set loop_messages = messages[1:] -%}
+{%- else -%}
+  {%- set ns.system = '' -%}
+  {%- set loop_messages = messages -%}
+{%- endif -%}
+{{- '<|im_start|>system\n' + ns.system + '<|im_end|>\n' -}}
+{%- for message in loop_messages -%}
+  {%- set is_last = loop.last -%}
+  {%- if message.role == 'user' -%}
+    {{- '<|im_start|>user\n' -}}
+    {%- if message.content is string -%}
+      {{- message.content -}}
+    {%- elif message.content is iterable -%}
+      {%- for part in message.content -%}
+        {%- if part.type is defined and part.type == 'text' -%}{{- part.text -}}{%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+    {{- '<|im_end|>\n' -}}
+  {%- elif message.role == 'assistant' -%}
+    {%- set content = message.content if message.content is string else '' -%}
+    {%- if is_last and add_generation_prompt -%}
+      {# prefill: leave the block open so the model continues it #}
+      {{- '<|im_start|>assistant\n' + content -}}
+    {%- else -%}
+      {{- '<|im_start|>assistant\n' + content + '<|im_end|>\n' -}}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if not (loop_messages and loop_messages[-1].role == 'assistant') -%}
+  {{- '<|im_start|>assistant\n' -}}
+  {%- if enable_thinking is defined and enable_thinking is sameas false -%}
+    {{- '' -}}
+  {%- endif -%}
+{%- endif -%}
