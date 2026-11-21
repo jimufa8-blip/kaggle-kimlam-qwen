@@ -262,6 +262,17 @@ curl https://xxxx.trycloudflare.com/v1/chat/completions \
 
 ## 排错
 
+**`AssertionError: ❌ 数据集不存在 …` / `❌ 找不到任何 *.gguf`**
+→ 权重 Dataset 没挂上，或挂上但 `DATASET_NAME` 写错。三种层级都会被自动扫描：
+`/kaggle/input/datasets/<owner>/<slug>`、`/kaggle/input/<slug>`、`/kaggle/input/<owner>/<slug>`，
+名字完全对不上时还会退化成「全盘找第一个 `*.gguf`」。
+还不行就跑 **Cell 1b 挂载诊断**，它把 `/kaggle/input` 的真实目录树打出来，照着改名字即可。
+
+**`FileNotFoundError: /kaggle/working/llama-server`**
+→ `/kaggle/working` **每个新 session 都是空的**（重启 kernel 也算）。每次开 notebook 都必须
+按顺序跑：Cell 1 → Cell 3（拷贝二进制）→ Cell 5（启动）。跳过 Cell 3 直接启动就是这个错。
+现在 Cell 5 里已经加了前置检查，会直接告诉你「先跑 Cell 3」。
+
 **`Dataset not found`**
 → Input 里两个 Dataset 都要挂：`qwen36-35b-a3b-uncensored-gguf` + `llama-cpp-bin`。
 
