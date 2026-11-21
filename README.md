@@ -95,7 +95,10 @@ Kaggle 账号，免费额度就够：12 小时 / session，30 小时 GPU / 周�
 2. 设置：Accelerator → **GPU T4 x2**，Internet → **ON**
 3. Input 里挂上 `qwen36-35b-a3b-uncensored-gguf` 和 `llama-cpp-bin`
 4. Cell 1 填 `KAGGLE_USERNAME`
-5. Run All
+5. **先跑 Cell 0（环境引导）**，再 Run All
+
+> Cell 0 负责 CUDA 运行库、`LD_LIBRARY_PATH`、`ENV`，后面每一格都依赖它。
+> 重启 kernel 后必须重跑。跳过它会直接卡在 `libcudart.so.12` 找不到。
 
 看到这段就可以用了：
 
@@ -342,9 +345,19 @@ print("n_ctx =", p["default_generation_settings"]["n_ctx"])
 名字完全对不上时还会退化成「全盘找第一个 `*.gguf`」。
 还不行就跑 **Cell 1b 挂载诊断**，它把 `/kaggle/input` 的真实目录树打出来，照着改名字即可。
 
+**`error while loading shared libraries: libcudart.so.12`**
+→ llama.cpp 的 CUDA 构建在运行时要 `libcudart.so.12` / `libcublas.so.12` / `libcublasLt.so.12`。
+Kaggle 镜像里这些文件通常**在**，但没进 `LD_LIBRARY_PATH`，动态链接器就找不到。
+**Cell 0（环境引导）**会自动全盘定位它们、缺的用 `pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12` 补上，
+再拼出共用的 `ENV`。所以顺序永远是 **Cell 0 → Cell 1 → Cell 3 → Cell 5**。
+
+**`NameError: name 'time' is not defined` / `'requests' is not defined`**
+→ 跳着跑 cell。Kaggle 的 cell 共享全局命名空间，只认「跑过的」。
+重跑 Cell 0（它 import 了 time / datetime / requests），或老老实实从上往下跑。
+
 **`FileNotFoundError: /kaggle/working/llama-server`**
 → `/kaggle/working` **每个新 session 都是空的**（重启 kernel 也算）。每次开 notebook 都必须
-按顺序跑：Cell 1 → Cell 3（拷贝二进制）→ Cell 5（启动）。跳过 Cell 3 直接启动就是这个错。
+按顺序跑：Cell 0 → Cell 1 → Cell 3（拷贝二进制）→ Cell 5（启动）。跳过 Cell 3 直接启动就是这个错。
 现在 Cell 5 里已经加了前置检查，会直接告诉你「先跑 Cell 3」。
 
 **`Dataset not found`**
